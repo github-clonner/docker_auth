@@ -26,34 +26,41 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cesanta/docker_auth/auth_server/authn"
-	"github.com/cesanta/docker_auth/auth_server/authz"
 	"github.com/docker/libtrust"
 	yaml "gopkg.in/yaml.v2"
+
+	"github.com/cesanta/docker_auth/auth_server/authn"
+	"github.com/cesanta/docker_auth/auth_server/authz"
 )
 
 type Config struct {
-	Server     ServerConfig                   `yaml:"server"`
-	Token      TokenConfig                    `yaml:"token"`
-	Users      map[string]*authn.Requirements `yaml:"users,omitempty"`
-	GoogleAuth *authn.GoogleAuthConfig        `yaml:"google_auth,omitempty"`
-	GitHubAuth *authn.GitHubAuthConfig        `yaml:"github_auth,omitempty"`
-	LDAPAuth   *authn.LDAPAuthConfig          `yaml:"ldap_auth,omitempty"`
-	MongoAuth  *authn.MongoAuthConfig         `yaml:"mongo_auth,omitempty"`
-	ExtAuth    *authn.ExtAuthConfig           `yaml:"ext_auth,omitempty"`
-	ACL        authz.ACL                      `yaml:"acl,omitempty"`
-	ACLMongo   *authz.ACLMongoConfig          `yaml:"acl_mongo,omitempty"`
-	ExtAuthz   *authz.ExtAuthzConfig          `yaml:"ext_authz,omitempty"`
+	Server      ServerConfig                   `yaml:"server"`
+	Token       TokenConfig                    `yaml:"token"`
+	Users       map[string]*authn.Requirements `yaml:"users,omitempty"`
+	GoogleAuth  *authn.GoogleAuthConfig        `yaml:"google_auth,omitempty"`
+	GitHubAuth  *authn.GitHubAuthConfig        `yaml:"github_auth,omitempty"`
+	LDAPAuth    *authn.LDAPAuthConfig          `yaml:"ldap_auth,omitempty"`
+	MongoAuth   *authn.MongoAuthConfig         `yaml:"mongo_auth,omitempty"`
+	ExtAuth     *authn.ExtAuthConfig           `yaml:"ext_auth,omitempty"`
+	PluginAuthn *authn.PluginAuthnConfig       `yaml:"plugin_authn,omitempty"`
+	ACL         authz.ACL                      `yaml:"acl,omitempty"`
+	ACLMongo    *authz.ACLMongoConfig          `yaml:"acl_mongo,omitempty"`
+	ExtAuthz    *authz.ExtAuthzConfig          `yaml:"ext_authz,omitempty"`
+	PluginAuthz *authz.PluginAuthzConfig       `yaml:"plugin_authz,omitempty"`
 }
 
 type ServerConfig struct {
-	ListenAddress string            `yaml:"addr,omitempty"`
-	PathPrefix    string            `yaml:"path_prefix,omitempty"`
-	RealIPHeader  string            `yaml:"real_ip_header,omitempty"`
-	RealIPPos     int               `yaml:"real_ip_pos,omitempty"`
-	CertFile      string            `yaml:"certificate,omitempty"`
-	KeyFile       string            `yaml:"key,omitempty"`
-	LetsEncrypt   LetsEncryptConfig `yaml:"letsencrypt,omitempty"`
+	ListenAddress       string            `yaml:"addr,omitempty"`
+	PathPrefix          string            `yaml:"path_prefix,omitempty"`
+	RealIPHeader        string            `yaml:"real_ip_header,omitempty"`
+	RealIPPos           int               `yaml:"real_ip_pos,omitempty"`
+	CertFile            string            `yaml:"certificate,omitempty"`
+	KeyFile             string            `yaml:"key,omitempty"`
+	HSTS                bool              `yaml:"hsts,omitempty"`
+	TLSMinVersion       string            `yaml:"tls_min_version,omitempty"`
+	TLSCurvePreferences []string          `yaml:"tls_curve_preferences,omitempty"`
+	TLSCipherSuites     []string          `yaml:"tls_cipher_suites,omitempty"`
+	LetsEncrypt         LetsEncryptConfig `yaml:"letsencrypt,omitempty"`
 
 	publicKey  libtrust.PublicKey
 	privateKey libtrust.PrivateKey
@@ -75,6 +82,65 @@ type TokenConfig struct {
 	privateKey libtrust.PrivateKey
 }
 
+// TLSCipherSuitesValues maps CipherSuite names as strings to the actual values
+// in the crypto/tls package
+// Taken from https://golang.org/pkg/crypto/tls/#pkg-constants
+var TLSCipherSuitesValues = map[string]uint16{
+	// TLS 1.0 - 1.2 cipher suites.
+	"TLS_RSA_WITH_RC4_128_SHA":                tls.TLS_RSA_WITH_RC4_128_SHA,
+	"TLS_RSA_WITH_3DES_EDE_CBC_SHA":           tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+	"TLS_RSA_WITH_AES_128_CBC_SHA":            tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	"TLS_RSA_WITH_AES_256_CBC_SHA":            tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	"TLS_RSA_WITH_AES_128_CBC_SHA256":         tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
+	"TLS_RSA_WITH_AES_128_GCM_SHA256":         tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	"TLS_RSA_WITH_AES_256_GCM_SHA384":         tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA":        tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
+	"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":    tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+	"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":    tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+	"TLS_ECDHE_RSA_WITH_RC4_128_SHA":          tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+	"TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA":     tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+	"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":      tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+	"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":      tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256": tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+	"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256":   tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+	"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256":   tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256": tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384":   tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384": tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305":    tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+	"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305":  tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+	// TLS 1.3 cipher suites.
+	"TLS_AES_128_GCM_SHA256":       tls.TLS_AES_128_GCM_SHA256,
+	"TLS_AES_256_GCM_SHA384":       tls.TLS_AES_256_GCM_SHA384,
+	"TLS_CHACHA20_POLY1305_SHA256": tls.TLS_CHACHA20_POLY1305_SHA256,
+	// TLS_FALLBACK_SCSV isn't a standard cipher suite but an indicator
+	// that the client is doing version fallback. See RFC 7507.
+	"TLS_FALLBACK_SCSV": tls.TLS_FALLBACK_SCSV,
+}
+
+// TLSVersionValues maps Version names as strings to the actual values in the
+// crypto/tls package
+// Taken from https://golang.org/pkg/crypto/tls/#pkg-constants
+var TLSVersionValues = map[string]uint16{
+	"TLS10": tls.VersionTLS10,
+	"TLS11": tls.VersionTLS11,
+	"TLS12": tls.VersionTLS12,
+	"TLS13": tls.VersionTLS13,
+	// Deprecated: SSLv3 is cryptographically broken, and will be
+	// removed in Go 1.14. See golang.org/issue/32716.
+	"SSL30": tls.VersionSSL30,
+}
+
+// TLSCurveIDValues maps CurveID names as strings to the actual values in the
+// crypto/tls package
+// Taken from https://golang.org/pkg/crypto/tls/#CurveID
+var TLSCurveIDValues = map[string]tls.CurveID{
+	"P256":   tls.CurveP256,
+	"P384":   tls.CurveP384,
+	"P521":   tls.CurveP521,
+	"X25519": tls.X25519,
+}
+
 func validate(c *Config) error {
 	if c.Server.ListenAddress == "" {
 		return errors.New("server.addr is required")
@@ -82,14 +148,16 @@ func validate(c *Config) error {
 	if c.Server.PathPrefix != "" && !strings.HasPrefix(c.Server.PathPrefix, "/") {
 		return errors.New("server.path_prefix must be an absolute path")
 	}
-
+	if (c.Server.TLSMinVersion == "0x0304" || c.Server.TLSMinVersion == "TLS13") && c.Server.TLSCipherSuites != nil {
+		return errors.New("TLS 1.3 ciphersuites are not configurable")
+	}
 	if c.Token.Issuer == "" {
 		return errors.New("token.issuer is required")
 	}
 	if c.Token.Expiration <= 0 {
 		return fmt.Errorf("expiration must be positive, got %d", c.Token.Expiration)
 	}
-	if c.Users == nil && c.ExtAuth == nil && c.GoogleAuth == nil && c.GitHubAuth == nil && c.LDAPAuth == nil && c.MongoAuth == nil {
+	if c.Users == nil && c.ExtAuth == nil && c.GoogleAuth == nil && c.GitHubAuth == nil && c.LDAPAuth == nil && c.MongoAuth == nil && c.PluginAuthn == nil {
 		return errors.New("no auth methods are configured, this is probably a mistake. Use an empty user map if you really want to deny everyone.")
 	}
 	if c.MongoAuth != nil {
@@ -120,13 +188,18 @@ func validate(c *Config) error {
 			}
 			ghac.ClientSecret = strings.TrimSpace(string(contents))
 		}
-		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.TokenDB == "" && ghac.GCSTokenDB == nil) {
+		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.TokenDB == "" && (ghac.GCSTokenDB == nil && ghac.RedisTokenDB == nil)) {
 			return errors.New("github_auth.{client_id,client_secret,token_db} are required")
 		}
 
 		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.GCSTokenDB != nil && (ghac.GCSTokenDB.Bucket == "" || ghac.GCSTokenDB.ClientSecretFile == "")) {
 			return errors.New("github_auth.{client_id,client_secret,gcs_token_db{bucket,client_secret_file}} are required")
 		}
+
+		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.RedisTokenDB != nil && ghac.RedisTokenDB.ClientOptions == nil && ghac.RedisTokenDB.ClusterOptions == nil) {
+			return errors.New("github_auth.{client_id,client_secret,redis_token_db.{redis_options,redis_cluster_options}} are required")
+		}
+
 		if ghac.HTTPTimeout <= 0 {
 			ghac.HTTPTimeout = time.Duration(10 * time.Second)
 		}
@@ -140,7 +213,7 @@ func validate(c *Config) error {
 			return fmt.Errorf("bad ext_auth config: %s", err)
 		}
 	}
-	if c.ACL == nil && c.ACLMongo == nil && c.ExtAuthz == nil {
+	if c.ACL == nil && c.ACLMongo == nil && c.ExtAuthz == nil && c.PluginAuthz == nil {
 		return errors.New("ACL is empty, this is probably a mistake. Use an empty list if you really want to deny all actions")
 	}
 
@@ -157,6 +230,16 @@ func validate(c *Config) error {
 	if c.ExtAuthz != nil {
 		if err := c.ExtAuthz.Validate(); err != nil {
 			return err
+		}
+	}
+	if c.PluginAuthn != nil {
+		if err := c.PluginAuthn.Validate(); err != nil {
+			return fmt.Errorf("bad plugin_authn config: %s", err)
+		}
+	}
+	if c.PluginAuthz != nil {
+		if err := c.PluginAuthz.Validate(); err != nil {
+			return fmt.Errorf("bad plugin_authz config: %s", err)
 		}
 	}
 	return nil

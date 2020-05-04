@@ -28,20 +28,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cesanta/docker_auth/auth_server/authn"
-	"github.com/cesanta/docker_auth/auth_server/authz"
 	"github.com/cesanta/glog"
 	"github.com/docker/distribution/registry/auth/token"
+
+	"github.com/cesanta/docker_auth/auth_server/api"
+	"github.com/cesanta/docker_auth/auth_server/authn"
+	"github.com/cesanta/docker_auth/auth_server/authz"
 )
 
 var (
 	hostPortRegex = regexp.MustCompile(`\[?(.+?)\]?:\d+$`)
+	scopeRegex    = regexp.MustCompile(`([a-z0-9]+)(\([a-z0-9]+\))?`)
 )
 
 type AuthServer struct {
 	config         *Config
-	authenticators []authn.Authenticator
-	authorizers    []authz.Authorizer
+	authenticators []api.Authenticator
+	authorizers    []api.Authorizer
 	ga             *authn.GoogleAuth
 	gha            *authn.GitHubAuth
 }
@@ -49,7 +52,7 @@ type AuthServer struct {
 func NewAuthServer(c *Config) (*AuthServer, error) {
 	as := &AuthServer{
 		config:      c,
-		authorizers: []authz.Authorizer{},
+		authorizers: []api.Authorizer{},
 	}
 	if c.ACL != nil {
 		staticAuthorizer, err := authz.NewACLAuthorizer(c.ACL)
@@ -105,6 +108,20 @@ func NewAuthServer(c *Config) (*AuthServer, error) {
 		}
 		as.authenticators = append(as.authenticators, ma)
 	}
+	if c.PluginAuthn != nil {
+		pluginAuthn, err := authn.NewPluginAuthn(c.PluginAuthn)
+		if err != nil {
+			return nil, err
+		}
+		as.authenticators = append(as.authenticators, pluginAuthn)
+	}
+	if c.PluginAuthz != nil {
+		pluginAuthz, err := authz.NewPluginAuthzAuthorizer(c.PluginAuthz)
+		if err != nil {
+			return nil, err
+		}
+		as.authorizers = append(as.authorizers, pluginAuthz)
+	}
 	return as, nil
 }
 
@@ -113,15 +130,16 @@ type authRequest struct {
 	RemoteAddr     string
 	RemoteIP       net.IP
 	User           string
-	Password       authn.PasswordString
+	Password       api.PasswordString
 	Account        string
 	Service        string
 	Scopes         []authScope
-	Labels         authn.Labels
+	Labels         api.Labels
 }
 
 type authScope struct {
 	Type    string
+	Class   string
 	Name    string
 	Actions []string
 }
@@ -142,6 +160,22 @@ func parseRemoteAddr(ra string) net.IP {
 	}
 	res := net.ParseIP(ra)
 	return res
+}
+
+func parseScope(scope string) (string, string, error) {
+	parts := scopeRegex.FindStringSubmatch(scope)
+	if parts == nil {
+		return "", "", fmt.Errorf("malformed scope request")
+	}
+
+	switch len(parts) {
+	case 3:
+		return parts[1], "", nil
+	case 4:
+		return parts[1], parts[3], nil
+	default:
+		return "", "", fmt.Errorf("malformed scope request")
+	}
 }
 
 func (as *AuthServer) ParseRequest(req *http.Request) (*authRequest, error) {
@@ -171,7 +205,15 @@ func (as *AuthServer) ParseRequest(req *http.Request) (*authRequest, error) {
 	user, password, haveBasicAuth := req.BasicAuth()
 	if haveBasicAuth {
 		ar.User = user
-		ar.Password = authn.PasswordString(password)
+		ar.Password = api.PasswordString(password)
+	} else if req.Method == "POST" {
+		// username and password could be part of form data
+		username := req.FormValue("username")
+		password := req.FormValue("password")
+		if username != "" && password != "" {
+			ar.User = username
+			ar.Password = api.PasswordString(password)
+		}
 	}
 	ar.Account = req.FormValue("account")
 	if ar.Account == "" {
@@ -185,40 +227,50 @@ func (as *AuthServer) ParseRequest(req *http.Request) (*authRequest, error) {
 	}
 	// https://github.com/docker/distribution/blob/1b9ab303a477ded9bdd3fc97e9119fa8f9e58fca/docs/spec/auth/scope.md#resource-scope-grammar
 	if req.FormValue("scope") != "" {
-		for _, scopeStr := range req.Form["scope"] {
-			parts := strings.Split(scopeStr, ":")
-			var scope authScope
-			switch len(parts) {
-			case 3:
-				scope = authScope{
-					Type:    parts[0],
-					Name:    parts[1],
-					Actions: strings.Split(parts[2], ","),
+		for _, scopeValue := range req.Form["scope"] {
+			for _, scopeStr := range strings.Split(scopeValue, " ") {
+				parts := strings.Split(scopeStr, ":")
+				var scope authScope
+
+				scopeType, scopeClass, err := parseScope(parts[0])
+				if err != nil {
+					return nil, err
 				}
-			case 4:
-				scope = authScope{
-					Type:    parts[0],
-					Name:    parts[1] + ":" + parts[2],
-					Actions: strings.Split(parts[3], ","),
+
+				switch len(parts) {
+				case 3:
+					scope = authScope{
+						Type:    scopeType,
+						Class:   scopeClass,
+						Name:    parts[1],
+						Actions: strings.Split(parts[2], ","),
+					}
+				case 4:
+					scope = authScope{
+						Type:    scopeType,
+						Class:   scopeClass,
+						Name:    parts[1] + ":" + parts[2],
+						Actions: strings.Split(parts[3], ","),
+					}
+				default:
+					return nil, fmt.Errorf("invalid scope: %q", scopeStr)
 				}
-			default:
-				return nil, fmt.Errorf("invalid scope: %q", scopeStr)
+				sort.Strings(scope.Actions)
+				ar.Scopes = append(ar.Scopes, scope)
 			}
-			sort.Strings(scope.Actions)
-			ar.Scopes = append(ar.Scopes, scope)
 		}
 	}
 	return ar, nil
 }
 
-func (as *AuthServer) Authenticate(ar *authRequest) (bool, authn.Labels, error) {
+func (as *AuthServer) Authenticate(ar *authRequest) (bool, api.Labels, error) {
 	for i, a := range as.authenticators {
 		result, labels, err := a.Authenticate(ar.Account, ar.Password)
 		glog.V(2).Infof("Authn %s %s -> %t, %+v, %v", a.Name(), ar.Account, result, labels, err)
 		if err != nil {
-			if err == authn.NoMatch {
+			if err == api.NoMatch {
 				continue
-			} else if err == authn.WrongPass {
+			} else if err == api.WrongPass {
 				glog.Warningf("Failed authentication with %s: %s", err, ar.Account)
 				return false, nil, nil
 			}
@@ -233,12 +285,12 @@ func (as *AuthServer) Authenticate(ar *authRequest) (bool, authn.Labels, error) 
 	return false, nil, nil
 }
 
-func (as *AuthServer) authorizeScope(ai *authz.AuthRequestInfo) ([]string, error) {
+func (as *AuthServer) authorizeScope(ai *api.AuthRequestInfo) ([]string, error) {
 	for i, a := range as.authorizers {
 		result, err := a.Authorize(ai)
 		glog.V(2).Infof("Authz %s %s -> %s, %s", a.Name(), *ai, result, err)
 		if err != nil {
-			if err == authz.NoMatch {
+			if err == api.NoMatch {
 				continue
 			}
 			err = fmt.Errorf("authz #%d returned error: %s", i+1, err)
@@ -255,7 +307,7 @@ func (as *AuthServer) authorizeScope(ai *authz.AuthRequestInfo) ([]string, error
 func (as *AuthServer) Authorize(ar *authRequest) ([]authzResult, error) {
 	ares := []authzResult{}
 	for _, scope := range ar.Scopes {
-		ai := &authz.AuthRequestInfo{
+		ai := &api.AuthRequestInfo{
 			Account: ar.Account,
 			Type:    scope.Type,
 			Name:    scope.Name,
@@ -333,6 +385,9 @@ func (as *AuthServer) CreateToken(ar *authRequest, ares []authzResult) (string, 
 func (as *AuthServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	glog.V(3).Infof("Request: %+v", req)
 	path_prefix := as.config.Server.PathPrefix
+	if as.config.Server.HSTS {
+		rw.Header().Add("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+	}
 	switch {
 	case req.URL.Path == path_prefix+"/":
 		as.doIndex(rw, req)
@@ -351,16 +406,16 @@ func (as *AuthServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 // https://developers.google.com/identity/sign-in/web/server-side-flow
 func (as *AuthServer) doIndex(rw http.ResponseWriter, req *http.Request) {
 	switch {
-		case as.ga != nil:
-			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(rw, "<h1>%s</h1>\n", as.config.Token.Issuer)
-			fmt.Fprint(rw, `<p><a href="/google_auth">Login with Google account</a></p>`)
-		case as.gha != nil:
-			url := as.config.Server.PathPrefix + "/github_auth"
-			http.Redirect(rw, req, url, 301)
-		default:
-			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(rw, "<h1>%s</h1>\n", as.config.Token.Issuer)
+	case as.ga != nil:
+		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(rw, "<h1>%s</h1>\n", as.config.Token.Issuer)
+		fmt.Fprint(rw, `<p><a href="/google_auth">Login with Google account</a></p>`)
+	case as.gha != nil:
+		url := as.config.Server.PathPrefix + "/github_auth"
+		http.Redirect(rw, req, url, 301)
+	default:
+		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(rw, "<h1>%s</h1>\n", as.config.Token.Issuer)
 	}
 }
 
@@ -403,7 +458,11 @@ func (as *AuthServer) doAuth(rw http.ResponseWriter, req *http.Request) {
 		glog.Errorf("%s: %s", ar, msg)
 		return
 	}
-	result, _ := json.Marshal(&map[string]string{"token": token})
+	// https://www.oauth.com/oauth2-servers/access-tokens/access-token-response/
+	// describes that the response should have the token in `access_token`
+	// https://docs.docker.com/registry/spec/auth/token/#token-response-fields
+	// the token should also be in `token` to support older clients
+	result, _ := json.Marshal(&map[string]string{"access_token": token, "token": token})
 	glog.V(3).Infof("%s", result)
 	rw.Header().Set("Content-Type", "application/json")
 	rw.Write(result)

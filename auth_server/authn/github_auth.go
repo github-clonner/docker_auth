@@ -29,6 +29,9 @@ import (
 	"time"
 
 	"github.com/cesanta/glog"
+	"github.com/go-redis/redis"
+
+	"github.com/cesanta/docker_auth/auth_server/api"
 )
 
 type GitHubTeamCollection []GitHubTeam
@@ -54,22 +57,28 @@ type ParentGitHubTeam struct {
 }
 
 type GitHubAuthConfig struct {
-	Organization     string                `yaml:"organization,omitempty"`
-	ClientId         string                `yaml:"client_id,omitempty"`
-	ClientSecret     string                `yaml:"client_secret,omitempty"`
-	ClientSecretFile string                `yaml:"client_secret_file,omitempty"`
-	TokenDB          string                `yaml:"token_db,omitempty"`
-	GCSTokenDB       *GitHubGCSStoreConfig `yaml:"gcs_token_db,omitempty"`
-	HTTPTimeout      time.Duration         `yaml:"http_timeout,omitempty"`
-	RevalidateAfter  time.Duration         `yaml:"revalidate_after,omitempty"`
-	GithubWebUri     string                `yaml:"github_web_uri,omitempty"`
-	GithubApiUri     string                `yaml:"github_api_uri,omitempty"`
-	RegistryUrl      string                `yaml:"registry_url,omitempty"`
+	Organization     string                  `yaml:"organization,omitempty"`
+	ClientId         string                  `yaml:"client_id,omitempty"`
+	ClientSecret     string                  `yaml:"client_secret,omitempty"`
+	ClientSecretFile string                  `yaml:"client_secret_file,omitempty"`
+	TokenDB          string                  `yaml:"token_db,omitempty"`
+	GCSTokenDB       *GitHubGCSStoreConfig   `yaml:"gcs_token_db,omitempty"`
+	RedisTokenDB     *GitHubRedisStoreConfig `yaml:"redis_token_db,omitempty"`
+	HTTPTimeout      time.Duration           `yaml:"http_timeout,omitempty"`
+	RevalidateAfter  time.Duration           `yaml:"revalidate_after,omitempty"`
+	GithubWebUri     string                  `yaml:"github_web_uri,omitempty"`
+	GithubApiUri     string                  `yaml:"github_api_uri,omitempty"`
+	RegistryUrl      string                  `yaml:"registry_url,omitempty"`
 }
 
 type GitHubGCSStoreConfig struct {
 	Bucket           string `yaml:"bucket,omitempty"`
 	ClientSecretFile string `yaml:"client_secret_file,omitempty"`
+}
+
+type GitHubRedisStoreConfig struct {
+	ClientOptions  *redis.Options        `yaml:"redis_options,omitempty"`
+	ClusterOptions *redis.ClusterOptions `yaml:"redis_cluster_options,omitempty"`
 }
 
 type GitHubAuthRequest struct {
@@ -161,11 +170,16 @@ func NewGitHubAuth(c *GitHubAuthConfig) (*GitHubAuth, error) {
 	var db TokenDB
 	var err error
 	dbName := c.TokenDB
-	if c.GCSTokenDB == nil {
-		db, err = NewTokenDB(c.TokenDB)
-	} else {
+
+	switch {
+	case c.GCSTokenDB != nil:
 		db, err = NewGCSTokenDB(c.GCSTokenDB.Bucket, c.GCSTokenDB.ClientSecretFile)
 		dbName = "GCS: " + c.GCSTokenDB.Bucket
+	case c.RedisTokenDB != nil:
+		db, err = NewRedisTokenDB(c.RedisTokenDB)
+		dbName = db.(*redisTokenDB).String()
+	default:
+		db, err = NewTokenDB(c.TokenDB)
 	}
 
 	if err != nil {
@@ -465,7 +479,7 @@ func (gha *GitHubAuth) validateServerToken(user string) (*TokenDBValue, error) {
 	return v, nil
 }
 
-func (gha *GitHubAuth) Authenticate(user string, password PasswordString) (bool, Labels, error) {
+func (gha *GitHubAuth) Authenticate(user string, password api.PasswordString) (bool, api.Labels, error) {
 	err := gha.db.ValidateToken(user, password)
 	if err == ExpiredToken {
 		_, err = gha.validateServerToken(user)

@@ -23,8 +23,10 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"github.com/go-ldap/ldap"
 	"github.com/cesanta/glog"
+	"github.com/go-ldap/ldap"
+
+	"github.com/cesanta/docker_auth/auth_server/api"
 )
 
 type LabelMap struct {
@@ -58,9 +60,9 @@ func NewLDAPAuth(c *LDAPAuthConfig) (*LDAPAuth, error) {
 }
 
 //How to authenticate user, please refer to https://github.com/go-ldap/ldap/blob/master/example_test.go#L166
-func (la *LDAPAuth) Authenticate(account string, password PasswordString) (bool, Labels, error) {
+func (la *LDAPAuth) Authenticate(account string, password api.PasswordString) (bool, api.Labels, error) {
 	if account == "" || password == "" {
-		return false, nil, NoMatch
+		return false, nil, api.NoMatch
 	}
 	l, err := la.ldapConnection()
 	if err != nil {
@@ -87,7 +89,7 @@ func (la *LDAPAuth) Authenticate(account string, password PasswordString) (bool,
 		return false, nil, uSearchErr
 	}
 	if accountEntryDN == "" {
-		return false, nil, NoMatch // User does not exist
+		return false, nil, api.NoMatch // User does not exist
 	}
 
 	// Bind as the user to verify their password
@@ -281,7 +283,7 @@ func (la *LDAPAuth) getCNFromDN(dn string) string {
 	if err != nil || len(parsedDN.RDNs) > 0 {
 		for _, rdn := range parsedDN.RDNs {
 			for _, rdnAttr := range rdn.Attributes {
-				if rdnAttr.Type == "CN" {
+				if strings.ToUpper(rdnAttr.Type) == "CN" {
 					return rdnAttr.Value
 				}
 			}
